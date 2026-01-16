@@ -1,29 +1,51 @@
-import pdfplumber
+import streamlit as st
 import pandas as pd
-from fuzzywuzzy import process
+from fuzzywuzzy import process, fuzz
 
-# 1. 解析 PDF 公告
-def extract_rare_disease_list(pdf_path):
-    all_data = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            table = page.extract_table()
-            if table:
-                # 假設表格欄位為: [序號, 中文病名, 英文病名, ICD編碼]
-                all_data.extend(table[1:]) # 跳過標題列
-    return pd.DataFrame(all_data, columns=['ID', 'Name_CH', 'Name_EN', 'ICD10'])
+st.set_page_config(page_title="罕藥自動化比對工具", layout="wide")
 
-# 2. 模糊比對邏輯
-def find_match(indication, ref_list):
-    # 同時比對英文與中文病名，取最高分者
-    match_en = process.extractOne(indication, ref_list['Name_EN'])
-    # 回傳格式: (匹配到的字串, 分數, 索引)
-    return match_en
+st.title("🇹🇼 罕見疾病藥品比對系統")
+st.info("請上傳藥品清單 Excel，系統將自動比對 1141020 公告之罕病名單。")
 
-# 主程式流程
-df_rare = extract_rare_disease_list("公告名單.pdf")
-df_drugs = pd.read_excel("RD_Test.xlsx")
+# --- 1. 載入政府公告資料 (建議先轉成 CSV 加速讀取) ---
+@st.cache_data
+def load_reference():
+    # 這裡放您解析 PDF 後的資料
+    return pd.read_csv("data/rare_disease_list_1141020.csv")
 
-# 執行比對並產生結果
-df_drugs['Match_Result'] = df_drugs['Indication'].apply(lambda x: find_match(x, df_rare))
-df_drugs.to_excel("比對結果報告.xlsx")
+df_ref = load_reference()
+
+# --- 2. 檔案上傳 ---
+uploaded_file = st.file_uploader("上傳藥品清單 (Excel/CSV)", type=["xlsx", "csv"])
+
+if uploaded_file:
+    df_user = pd.read_excel(uploaded_file) if ".xlsx" in uploaded_file.name else pd.read_csv(uploaded_file)
+    
+    st.write("### 原始資料預覽", df_user.head())
+    
+    target_col = st.selectbox("請選擇要比對的適應症欄位 (Indication)", df_user.columns)
+    
+    if st.button("開始自動比對"):
+        results = []
+        for text in df_user[target_col]:
+            # 進行模糊比對 (比對英文病名)
+            match = process.extractOne(str(text), df_ref['English_Name'], scorer=fuzz.token_set_ratio)
+            
+            if match and match[1] > 70: # 設定相似度門檻
+                ref_row = df_ref.iloc[match[2]]
+                results.append({
+                    "原始輸入": text,
+                    "比對結果": "✅ 命中",
+                    "匹配病名": ref_row['English_Name'],
+                    "中文病名": ref_row['Chinese_Name'],
+                    "ICD-10": ref_row['ICD10'],
+                    "信心分數": match[1]
+                })
+            else:
+                results.append({"原始輸入": text, "比對結果": "❌ 未命中", "匹配病名": "-", "中文病名": "-", "ICD-10": "-", "信心分數": 0})
+        
+        df_res = pd.DataFrame(results)
+        st.write("### 比對結果", df_res)
+        
+        # 下載按鈕
+        st.download_button("下載比對報告", df_res.to_csv(index=False).encode('utf-8-sig'), "Match_Report.csv", "text/csv")
